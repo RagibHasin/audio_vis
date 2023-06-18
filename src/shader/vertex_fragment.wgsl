@@ -60,23 +60,21 @@ fn xyz_to_rgb(color: vec3f) -> vec3f {
 struct SampleCommand {
     color: vec4f,
     center: vec2f,
-    radius: f32,
-    fuzz: f32,
+    radius_in: f32,
+    radius_out: f32,
 };
 
 @group(0) @binding(0)
 var<storage> samples: array<SampleCommand>;
 
 fn sample_eval(sample: SampleCommand, pos: vec2f) -> vec4f {
-    let dist = pos - sample.center;
-    let alpha = 1. - smoothstep(
-        sample.radius * (1. - 0.2 * sample.fuzz) - 1.,
-        sample.radius * (1. + 0.2 * sample.fuzz) + 1.,
-        length(dist)
-    );
     return vec4(
         sample.color.xyz, // lab
-        sample.color.a * alpha
+        sample.color.a * (1. - smoothstep(
+            sample.radius_in - 1.,
+            sample.radius_out + 1.,
+            length(pos - sample.center)
+        ))
     );
 }
 

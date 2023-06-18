@@ -83,7 +83,7 @@ impl Model {
                     .flatten()
                     .fuse(),
                 ) // (channel_0, channel_1)
-                .chain(iter::repeat((0, 0)).take((T_SWEET * 96e3) as usize))
+                .chain(iter::repeat((0, 0)).take((T_SWEET * sample_rate as f32) as usize))
                 .tuple_windows() // ((last_channel_0, last_channel_1), (now_channel_0, now_channel_1))
                 .step_by(STEP),
         );
@@ -260,13 +260,13 @@ impl Model {
             let fuzz = digamma_u(spreadth);
 
             Some(SampleDesc {
-                radius,
-                center: point2(x, y),
                 luma,
                 a,
                 b,
                 alpha,
-                fuzz,
+                center: point2(x, y),
+                radius_in: radius * (1. - 0.2 * fuzz),
+                radius_out: radius * (1. + 0.2 * fuzz),
             })
         };
 
@@ -312,8 +312,8 @@ pub struct SampleDesc {
     pub b: f32,
     pub alpha: f32,
     pub center: Point2D<f32>,
-    pub radius: f32,
-    pub fuzz: f32,
+    pub radius_in: f32,
+    pub radius_out: f32,
 }
 
 impl Default for SampleDesc {
@@ -324,8 +324,8 @@ impl Default for SampleDesc {
             b: 0.,
             alpha: 1.,
             center: Default::default(),
-            radius: 0.,
-            fuzz: 1.,
+            radius_in: 0.,
+            radius_out: 0.,
         }
     }
 }
@@ -338,8 +338,8 @@ impl std::fmt::Debug for SampleDesc {
             b,
             alpha,
             center,
-            radius,
-            fuzz,
+            radius_in: radius,
+            radius_out: fuzz,
         } = self;
         write!(
             f,
