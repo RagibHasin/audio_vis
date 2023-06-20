@@ -190,6 +190,9 @@ impl State {
             self.config.width = new_size.width;
             self.config.height = new_size.height;
             self.surface.configure(&self.device, &self.config);
+
+            self.model.config.viewport_size.width = new_size.width;
+            self.model.config.viewport_size.height = new_size.height;
         }
     }
 
@@ -199,14 +202,12 @@ impl State {
     }
 
     fn update(&mut self, since_last: time::Duration) -> bool {
+        self.model.update(since_last)
+    }
+
+    fn render(&mut self) -> Result<(), wgpu::SurfaceError> {
         self.sample_cmds.clear();
-
-        let finished = self.model.update(since_last);
-
-        self.sample_cmds.extend(
-            self.model
-                .render(size2(self.size.width, self.size.height).cast()),
-        );
+        self.sample_cmds.extend(self.model.render());
         if self.sample_cmds.is_empty() {
             self.sample_cmds.push(SampleDesc::default());
         }
@@ -216,10 +217,6 @@ impl State {
             bytemuck::cast_slice(&self.sample_cmds),
         );
 
-        finished
-    }
-
-    fn render(&mut self) -> Result<(), wgpu::SurfaceError> {
         let output = self.surface.get_current_texture()?;
         let view = output
             .texture
@@ -261,27 +258,30 @@ impl State {
     }
 }
 
-pub async fn run() {
+pub async fn run() -> anyhow::Result<()> {
     tracing_subscriber::fmt::init();
+
+    let mut args = pico_args::Arguments::from_env();
+    let (model, path) = Model::from_args(&mut args, size2(960, 540))?;
+    let enable_audio = args.contains(["-a", "--enable-audio"]);
 
     let event_loop = EventLoop::new();
     let window = WindowBuilder::new()
         .with_title("Audio Visualization Viewer")
-        .with_inner_size(PhysicalSize::new(960, 540))
-        .with_resizable(false)
-        .build(&event_loop)
-        .unwrap();
+        .with_inner_size(PhysicalSize::new(
+            model.config.viewport_size.width,
+            model.config.viewport_size.height,
+        ))
+        .build(&event_loop)?;
 
-    let mut args = std::env::args();
-    let path = args.nth(1).unwrap();
-    let mut state = State::new(window, Model::new(&path).unwrap()).await;
+    let mut state = State::new(window, model).await;
 
-    let _audio_handle = if args.next().map_or(false, |s| s == "-a") {
-        let (stream, stream_handle) = rodio::OutputStream::try_default().unwrap();
-        let file = std::io::BufReader::new(std::fs::File::open(&path).unwrap());
-        let source = rodio::Decoder::new(file).unwrap();
+    let _audio_handle = if enable_audio {
+        let (stream, stream_handle) = rodio::OutputStream::try_default()?;
+        let file = std::io::BufReader::new(std::fs::File::open(&path)?);
+        let source = rodio::Decoder::new(file)?;
 
-        stream_handle.play_raw(source.convert_samples()).unwrap();
+        stream_handle.play_raw(source.convert_samples())?;
 
         Some((stream, stream_handle))
     } else {
@@ -337,5 +337,5 @@ pub async fn run() {
 }
 
 fn main() {
-    pollster::block_on(run());
+    pollster::block_on(run()).unwrap();
 }

@@ -1,12 +1,9 @@
-use std::time::Duration;
+use std::{path::PathBuf, time::Duration};
 
 use audio_vis::{Model, SampleDesc};
 
+use euclid::size2;
 use wgpu::util::DeviceExt;
-
-const VP_WIDTH: u32 = 1920;
-const VP_HEIGHT: u32 = 1080;
-const VP_SIZE: euclid::default::Size2D<f32> = euclid::size2(VP_WIDTH as f32, VP_HEIGHT as f32);
 
 struct State {
     device: wgpu::Device,
@@ -43,9 +40,10 @@ impl State {
             .await
             .unwrap();
 
+        let vp = model.config.viewport_size;
         let texture_size = wgpu::Extent3d {
-            width: VP_WIDTH,
-            height: VP_HEIGHT,
+            width: vp.width,
+            height: vp.height,
             depth_or_array_layers: 1,
         };
         let render_out_texture = device.create_texture(&wgpu::TextureDescriptor {
@@ -60,7 +58,7 @@ impl State {
         });
 
         let output_buffer_size =
-            (std::mem::size_of::<u32>() as u32 * VP_HEIGHT * VP_WIDTH) as wgpu::BufferAddress;
+            (std::mem::size_of::<u32>() as u32 * vp.width * vp.height) as wgpu::BufferAddress;
         let output_buffer = device.create_buffer(&wgpu::BufferDescriptor {
             size: output_buffer_size,
             usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
@@ -161,11 +159,12 @@ impl State {
     }
 
     fn update(&mut self, since_last: Duration) -> bool {
+        self.model.update(since_last)
+    }
+
+    fn render(&mut self) -> Result<(), wgpu::SurfaceError> {
         self.sample_cmds.clear();
-
-        let finished = self.model.update(since_last);
-
-        self.sample_cmds.extend(self.model.render(VP_SIZE));
+        self.sample_cmds.extend(self.model.render());
         if self.sample_cmds.is_empty() {
             self.sample_cmds.push(SampleDesc::default());
         }
@@ -175,10 +174,6 @@ impl State {
             bytemuck::cast_slice(&self.sample_cmds),
         );
 
-        finished
-    }
-
-    fn render(&self) -> Result<(), wgpu::SurfaceError> {
         let texture_view = self.render_out_texture.create_view(&Default::default());
 
         let mut encoder = self
@@ -219,8 +214,10 @@ impl State {
                 buffer: &self.output_buffer,
                 layout: wgpu::ImageDataLayout {
                     offset: 0,
-                    bytes_per_row: Some(std::mem::size_of::<u32>() as u32 * VP_WIDTH),
-                    rows_per_image: Some(VP_HEIGHT),
+                    bytes_per_row: Some(
+                        std::mem::size_of::<u32>() as u32 * self.model.config.viewport_size.width,
+                    ),
+                    rows_per_image: Some(self.model.config.viewport_size.height),
                 },
             },
             self.texture_size,
@@ -247,46 +244,51 @@ impl State {
 
             let data = buffer_slice.get_mapped_range();
 
-            let buffer =
-                image::ImageBuffer::<image::Rgba<u8>, _>::from_raw(VP_WIDTH, VP_HEIGHT, data)
-                    .unwrap();
+            let buffer = image::ImageBuffer::<image::Rgba<u8>, _>::from_raw(
+                self.model.config.viewport_size.width,
+                self.model.config.viewport_size.height,
+                data,
+            )
+            .unwrap();
             f(buffer);
         }
         self.output_buffer.unmap();
     }
 }
 
-async fn run() {
-    let mut args = std::env::args();
-    let mut state = State::new(Model::new(args.nth(1).unwrap()).unwrap()).await;
+async fn run() -> anyhow::Result<()> {
+    tracing_subscriber::fmt::init();
+
+    let mut args = pico_args::Arguments::from_env();
+    let (model, _) = Model::from_args(&mut args, size2(1920, 1080))?;
+
+    let skip = args
+        .opt_value_from_fn(["-x", "--skip"], str::parse)?
+        .unwrap_or(0usize);
+    let upto = args
+        .opt_value_from_fn(["-z", "--take"], str::parse)?
+        .unwrap_or(usize::MAX);
+    let save_in = args
+        .opt_value_from_fn("--in", |p| {
+            Ok::<_, std::convert::Infallible>(PathBuf::from(p))
+        })?
+        .unwrap_or_else(|| PathBuf::from("renders"));
+
+    let mut state = State::new(model).await;
 
     let mut break_in_next = false;
 
-    let skip = args
-        .next()
-        .as_deref()
-        .map(str::parse::<usize>)
-        .transpose()
-        .ok()
-        .flatten()
-        .unwrap_or(0);
-    let upto = args
-        .next()
-        .as_deref()
-        .map(str::parse::<usize>)
-        .transpose()
-        .ok()
-        .flatten()
-        .unwrap_or(usize::MAX);
     for frame in 0..skip {
         state.update(Duration::new(0, 33333333 + (frame % 3 == 0) as u32));
     }
     for frame in skip..upto {
-        state.render().unwrap();
+        let mut rendered_path = save_in.clone();
+        rendered_path.push(format!("{frame:07}.png"));
+        state.render()?;
         state
             .process_image_buffer(|img| {
-                img.save(format!("renders/{frame:07}.png")).unwrap();
-                eprintln!("Saved frame {frame}");
+                img.save(&rendered_path).unwrap();
+                tracing::info!("Saved frame {frame}");
             })
             .await;
         if break_in_next {
@@ -295,8 +297,10 @@ async fn run() {
 
         break_in_next = state.update(Duration::new(0, 33333333 + (frame % 3 == 0) as u32));
     }
+
+    Ok(())
 }
 
 fn main() {
-    pollster::block_on(run());
+    pollster::block_on(run()).unwrap();
 }

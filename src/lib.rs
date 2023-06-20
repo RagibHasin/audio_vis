@@ -1,10 +1,15 @@
 #![allow(clippy::excessive_precision)]
 
-use std::{f32::consts, iter};
+use std::{
+    f32::consts,
+    iter,
+    path::{Path, PathBuf},
+};
 
+use anyhow::Context;
 use euclid::{
     default::{Point2D, Size2D, Vector2D},
-    point2,
+    point2, size2,
 };
 use itertools::Itertools;
 use rodio::Source;
@@ -15,8 +20,8 @@ const STEP: usize = 1200;
 const F_MAX: f32 = 20e3;
 const T_SWEET: f32 = 4.32;
 const GOLDEN_RATIO: f32 = 0.6085538238;
-const VOL_PER_HALF_TURN: i16 = 5120;
-const RAD_PER_VOL: f32 = consts::PI / VOL_PER_HALF_TURN as f32;
+// const VOL_PER_HALF_TURN: i16 = 5120;
+// const RAD_PER_VOL: f32 = consts::PI / VOL_PER_HALF_TURN as f32;
 
 fn gamma_c(x: f32) -> f32 {
     const A0: f32 = 0.25;
@@ -42,6 +47,37 @@ pub struct Model {
     pub audio_buffer: [Vec<(i16, i16)>; 2],
     pub sample_buffer: [Vec<PartialSampleDesc>; 2],
     pub k_offset: usize,
+    pub config: Config,
+}
+
+pub struct Config {
+    pub viewport_size: Size2D<u32>,
+    pub vol_per_half_turn: i16,
+    pub linear_position: bool,
+    pub independent_luma: bool,
+    pub max_chroma: f32,
+    pub hue_offset: f32,
+    pub fuzz_factor: f32,
+}
+
+impl Config {
+    fn rad_per_vol(&self) -> f32 {
+        consts::PI / self.vol_per_half_turn as f32
+    }
+}
+
+impl Default for Config {
+    fn default() -> Self {
+        Self {
+            viewport_size: size2(960, 540),
+            vol_per_half_turn: 5120,
+            linear_position: false,
+            independent_luma: false,
+            max_chroma: 2.8,
+            hue_offset: 0.,
+            fuzz_factor: 0.2,
+        }
+    }
 }
 
 impl Model {
@@ -53,7 +89,62 @@ impl Model {
         (self.sample_rate as f32 * T_SWEET) as usize / STEP + 1
     }
 
-    pub fn new(path: impl AsRef<std::path::Path>) -> anyhow::Result<Model> {
+    pub fn config(self, config: Config) -> Self {
+        Model { config, ..self }
+    }
+
+    pub fn from_args(
+        args: &mut pico_args::Arguments,
+        default_viewport_size: Size2D<u32>,
+    ) -> Result<(Model, PathBuf), anyhow::Error> {
+        let path =
+            args.free_from_os_str(|p| Ok::<_, std::convert::Infallible>(PathBuf::from(p)))?;
+        let downsample = args.contains(["-d", "--downsample"]);
+        let dont_prepend_zero = args.contains(["-!0", "--skip-init-zero"]);
+        let viewport_size = args
+            .opt_value_from_fn(["-s", "--size"], |s| {
+                let mut s = s.split('x');
+                Ok::<_, anyhow::Error>(size2(
+                    s.next().context("invalid viewport size")?.parse()?,
+                    s.next().context("invalid viewport size")?.parse()?,
+                ))
+            })?
+            .unwrap_or(default_viewport_size);
+        let vol_per_half_turn = args
+            .opt_value_from_fn("--vpht", str::parse)?
+            .unwrap_or(5120_i16);
+        let linear_position = args.contains(["-l", "--linear-pos"]);
+        let independent_luma = args.contains(["-i", "--independent-luma"]);
+        let max_chroma = args
+            .opt_value_from_fn("--max-chroma", str::parse)?
+            .unwrap_or(2.8_f32);
+        let hue_offset = args
+            .opt_value_from_fn(["-h", "--hue-offset"], str::parse)?
+            .unwrap_or(0_f32)
+            .to_radians();
+        let fuzz_factor = args
+            .opt_value_from_fn(["-f", "--fuzz-factor"], str::parse)?
+            .unwrap_or(0.2_f32);
+
+        Ok((
+            Model::new(&path, downsample, !dont_prepend_zero)?.config(Config {
+                viewport_size: viewport_size.cast(),
+                vol_per_half_turn,
+                linear_position,
+                independent_luma,
+                max_chroma,
+                hue_offset,
+                fuzz_factor,
+            }),
+            path,
+        ))
+    }
+
+    pub fn new(
+        path: impl AsRef<Path>,
+        downsample: bool,
+        prepend_zero: bool,
+    ) -> anyhow::Result<Model> {
         let mut audio_reader =
             rodio::Decoder::new(std::io::BufReader::new(std::fs::File::open(path.as_ref())?))?;
 
@@ -64,30 +155,34 @@ impl Model {
 
         let channels = audio_reader.channels();
 
-        let audio_iter = Box::new(
-            iter::once((0, 0))
-                .chain(
-                    iter::repeat_with(move || {
-                        let v = audio_reader.next()?;
-                        if channels == 1 {
-                            Some((v, v))
-                        } else {
-                            let w = audio_reader.next()?;
-                            audio_reader
-                                .by_ref()
-                                .take(channels as usize - 2)
-                                .for_each(|_| {});
-                            Some((v, w))
-                        }
-                    })
-                    .flatten()
-                    .fuse(),
-                ) // (channel_0, channel_1)
-                .chain(iter::repeat((0, 0)).take((T_SWEET * sample_rate as f32) as usize))
-                .tuple_windows() // ((last_channel_0, last_channel_1), (now_channel_0, now_channel_1))
-                .step_by(STEP),
-        );
-        let audio_buffer = [vec![(0, 0); buffer_size + 1], vec![(0, 0); buffer_size + 1]];
+        let audio_iter = prepend_zero
+            .then_some((0, 0))
+            .into_iter()
+            .chain(
+                iter::repeat_with(move || {
+                    let v = audio_reader.next()?;
+                    if channels == 1 {
+                        Some((v, v))
+                    } else {
+                        let w = audio_reader.next()?;
+                        audio_reader
+                            .by_ref()
+                            .take(channels as usize - 2)
+                            .for_each(|_| {});
+                        Some((v, w))
+                    }
+                })
+                .flatten()
+                .fuse(),
+            ) // (channel_0, channel_1)
+            .chain(iter::repeat((0, 0)).take((T_SWEET * sample_rate as f32) as usize));
+        // ((last_channel_0, last_channel_1), (now_channel_0, now_channel_1))
+        let audio_iter = if downsample {
+            Box::new(audio_iter.step_by(STEP).tuple_windows()) as BufIter
+        } else {
+            Box::new(audio_iter.tuple_windows().step_by(STEP)) as BufIter
+        };
+        let audio_buffer = [vec![(0, 0); buffer_size], vec![(0, 0); buffer_size]];
         let sample_buffer = [
             vec![PartialSampleDesc::default(); buffer_size],
             vec![PartialSampleDesc::default(); buffer_size],
@@ -100,6 +195,7 @@ impl Model {
             audio_buffer,
             sample_buffer,
             k_offset: 0,
+            config: Config::default(),
         })
     }
 
@@ -138,50 +234,47 @@ impl Model {
 
         let lin_freq_coeff = self.sample_rate as f32 / consts::TAU / F_MAX;
         for (audio_buffer, sample_buffer) in self.audio_buffer.iter().zip(&mut self.sample_buffer) {
-            sample_buffer.extend(
-                audio_buffer
-                    .iter()
-                    .copied()
-                    .skip(buffer_len - 1 - take)
-                    .scan(
-                        sample_buffer.last().map_or(GOLDEN_RATIO, |c| c.position),
-                        |prev_position, (audio_, audio)| {
-                            let phase = audio as f32 * RAD_PER_VOL;
-                            let velocity = (audio as i32 - audio_ as i32) as f32;
-                            let frac_freq = (velocity * RAD_PER_VOL * lin_freq_coeff) % 1.;
+            sample_buffer.extend(audio_buffer.iter().copied().skip(buffer_len - take).scan(
+                sample_buffer.last().map_or(GOLDEN_RATIO, |c| c.position),
+                |prev_position, (audio_, audio)| {
+                    let phase = audio as f32 * self.config.rad_per_vol();
+                    let velocity = (audio as i32 - audio_ as i32) as f32;
+                    let frac_freq = (velocity * self.config.rad_per_vol() * lin_freq_coeff) % 1.;
 
-                            let position =
-                                gamma_c((velocity / i16::MAX as f32).clamp(-1., 1.).abs())
-                                    .copysign(velocity)
-                                    * if velocity <= 0. {
-                                        *prev_position
-                                    } else {
-                                        1. - *prev_position
-                                    }
-                                    + *prev_position;
+                    let position = *prev_position
+                        + if velocity <= 0. {
+                            *prev_position
+                        } else {
+                            1. - *prev_position
+                        } * if self.config.linear_position {
+                            velocity * GOLDEN_RATIO / i16::MAX as f32
+                        } else {
+                            gamma_c((velocity / i16::MAX as f32).clamp(-1., 1.).abs())
+                                .copysign(velocity)
+                        };
 
-                            let audio = to_f32(audio);
-                            let chroma = (audio / phase.cos()).abs().min(2.8);
-                            let hue = phase;
+                    let audio = to_f32(audio);
+                    let chroma = (audio / phase.cos()).abs().min(self.config.max_chroma);
+                    let hue = phase;
 
-                            *prev_position = position;
+                    *prev_position = position;
 
-                            Some(PartialSampleDesc {
-                                audio,
-                                frac_freq,
-                                chroma,
-                                hue,
-                                position,
-                            })
-                        },
-                    ),
-            );
+                    Some(PartialSampleDesc {
+                        audio,
+                        frac_freq,
+                        chroma,
+                        hue,
+                        position,
+                    })
+                },
+            ));
         }
 
         self.buffer_len() != self.expented_buffer_len() // is finished?
     }
 
-    pub fn render(&self, vp: Size2D<f32>) -> impl Iterator<Item = SampleDesc> + '_ {
+    pub fn render(&self) -> impl Iterator<Item = SampleDesc> + '_ {
+        let vp = self.config.viewport_size.cast::<f32>();
         let buffer_size = self.buffer_len();
 
         let channel_area = 0.5 * vp.height * (2. * vp.width - vp.height - 1.);
@@ -253,7 +346,11 @@ impl Model {
                 (x, y)
             };
 
-            let luma = (gamma_c(abs_frac_freq) * gamma_c(audio.abs())).powf(GOLDEN_RATIO);
+            let luma = if self.config.independent_luma {
+                gamma_c(abs_frac_freq)
+            } else {
+                (gamma_c(abs_frac_freq) * gamma_c(audio.abs())).powf(GOLDEN_RATIO)
+            };
             let (a, b) =
                 Vector2D::from_angle_and_length(euclid::Angle { radians: hue }, chroma).to_tuple();
             let alpha = 1. - gamma_c(spreadth);
@@ -265,8 +362,8 @@ impl Model {
                 b,
                 alpha,
                 center: point2(x, y),
-                radius_in: radius * (1. - 0.2 * fuzz),
-                radius_out: radius * (1. + 0.2 * fuzz),
+                radius_in: radius * (1. - self.config.fuzz_factor * fuzz),
+                radius_out: radius * (1. + self.config.fuzz_factor * fuzz),
             })
         };
 
