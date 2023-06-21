@@ -2,7 +2,6 @@ use std::{path::PathBuf, time::Duration};
 
 use audio_vis::{Model, SampleDesc};
 
-use euclid::size2;
 use wgpu::util::DeviceExt;
 
 struct State {
@@ -256,24 +255,7 @@ impl State {
     }
 }
 
-async fn run() -> anyhow::Result<()> {
-    tracing_subscriber::fmt::init();
-
-    let mut args = pico_args::Arguments::from_env();
-    let (model, _) = Model::from_args(&mut args, size2(1920, 1080))?;
-
-    let skip = args
-        .opt_value_from_fn(["-x", "--skip"], str::parse)?
-        .unwrap_or(0usize);
-    let upto = args
-        .opt_value_from_fn(["-z", "--take"], str::parse)?
-        .unwrap_or(usize::MAX);
-    let save_in = args
-        .opt_value_from_fn("--in", |p| {
-            Ok::<_, std::convert::Infallible>(PathBuf::from(p))
-        })?
-        .unwrap_or_else(|| PathBuf::from("renders"));
-
+pub async fn run(model: Model, skip: usize, upto: usize, save_in: PathBuf) -> anyhow::Result<()> {
     let mut state = State::new(model).await;
 
     let mut break_in_next = false;
@@ -299,8 +281,4 @@ async fn run() -> anyhow::Result<()> {
     }
 
     Ok(())
-}
-
-fn main() {
-    pollster::block_on(run()).unwrap();
 }

@@ -2,7 +2,6 @@ use std::{iter, time};
 
 use audio_vis::{Model, SampleDesc};
 
-use euclid::size2;
 use rodio::source::Source;
 use wgpu::util::DeviceExt;
 use winit::{
@@ -258,13 +257,7 @@ impl State {
     }
 }
 
-pub async fn run() -> anyhow::Result<()> {
-    tracing_subscriber::fmt::init();
-
-    let mut args = pico_args::Arguments::from_env();
-    let (model, path) = Model::from_args(&mut args, size2(960, 540))?;
-    let enable_audio = args.contains(["-a", "--enable-audio"]);
-
+pub async fn run(model: Model, path: std::path::PathBuf, enable_audio: bool) -> anyhow::Result<()> {
     let event_loop = EventLoop::new();
     let window = WindowBuilder::new()
         .with_title("Audio Visualization Viewer")
@@ -334,8 +327,4 @@ pub async fn run() -> anyhow::Result<()> {
         }
         _ => {}
     });
-}
-
-fn main() {
-    pollster::block_on(run()).unwrap();
 }
