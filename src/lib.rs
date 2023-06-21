@@ -5,7 +5,7 @@ use std::{f32::consts, ops::RangeInclusive};
 use anyhow::Context;
 use euclid::{
     default::{Point2D, Size2D, Vector2D},
-    point2, size2,
+    size2, vec2,
 };
 use serde::Deserialize;
 
@@ -65,7 +65,7 @@ where
 
 pub fn parse_size(s: &str) -> anyhow::Result<Size2D<u32>> {
     let mut s = s.split('x');
-    Ok(euclid::size2(
+    Ok(size2(
         s.next().context("invalid viewport size")?.parse()?,
         s.next().context("invalid viewport size")?.parse()?,
     ))
@@ -205,6 +205,8 @@ impl Model {
 
     pub fn render(&self) -> impl Iterator<Item = SampleDesc> + '_ {
         let vp = self.config.viewport_size.cast::<f32>();
+        let aspect_ratio = vp.width / vp.height;
+
         let buffer_size = self.buffer_len();
 
         let sample_filler = move |(
@@ -238,12 +240,49 @@ impl Model {
             };
 
             let radius = vp.width / 2. * spreadth;
-            let (x, y) = expand_position(position, vp);
-            let (x, y) = if channel == 1 {
-                (vp.width - x - 1., vp.height - y - 1.)
+            let reduced_vp: Size2D<_> = size2(aspect_ratio, 1.) * 1080.;
+            let channel_area =
+                0.5 * reduced_vp.height * (2. * reduced_vp.width - reduced_vp.height - 1.);
+            let cool_area = reduced_vp.height * (reduced_vp.width - reduced_vp.height);
+
+            let position = position * channel_area;
+
+            let (x, y) = if position < cool_area {
+                let x_ = position.div_euclid(reduced_vp.height);
+                let y = if x_.rem_euclid(2.) == 0. {
+                    position.rem_euclid(reduced_vp.height)
+                } else {
+                    reduced_vp.height - position.rem_euclid(reduced_vp.height)
+                };
+                (x_ + y, y)
             } else {
-                (x, y)
+                let x_ = reduced_vp.width - reduced_vp.height;
+                let uncool_position = position - cool_area;
+                if x_.rem_euclid(2.) == 0. {
+                    // 0.5 x (x+1) = position - cool_area
+                    // => x^2 + x - 2 (position - cool_area) = 0
+                    // => x = 0.5 (-1 + sqrt(1 + 8 (position - cool_area)))
+                    let x = (0.5 * ((1. + 8. * uncool_position).sqrt() - 1.)).floor();
+                    let y = uncool_position - 0.5 * x * (x + 1.);
+                    (x_ + x, y)
+                } else {
+                    // channel_area - 0.5 x (x+1) = position - cool_area
+                    // 0.5 x (x+1) = channel_area - (position - cool_area)
+                    // => x^2 + x - 2 (channel_area - (position - cool_area)) = 0
+                    // => x = 0.5 (-1 + sqrt(1 + 8 (channel_area - (position - cool_area))))
+                    let x =
+                        (0.5 * ((1. + 8. * (channel_area - uncool_position)).sqrt() - 1.)).ceil();
+                    let y = channel_area - uncool_position - 0.5 * x * (x + 1.);
+                    (reduced_vp.width - x - y, reduced_vp.height - y)
+                }
             };
+            let position = vec2(x, y) / 1080.;
+            let center = (if channel == 1 {
+                vec2(aspect_ratio, 1.) - position
+            } else {
+                position
+            } * vp.height)
+                .to_point();
 
             let luma = if self.config.independent_luma {
                 gamma_c(abs_frac_freq)
@@ -262,7 +301,7 @@ impl Model {
                 a,
                 b,
                 alpha,
-                center: point2(x, y),
+                center,
                 radius_in: radius * (1. - self.config.fuzz_factor * fuzz),
                 radius_out: radius * (1. + self.config.fuzz_factor * fuzz),
             })
@@ -274,53 +313,6 @@ impl Model {
         )
         .enumerate()
         .flat_map(sample_filler)
-    }
-}
-
-fn expand_position(position: f32, vp: Size2D<f32>) -> (f32, f32) {
-    let channel_area = 0.5 * vp.height * (2. * vp.width - vp.height - 1.);
-    let cool_area = vp.height * (vp.width - vp.height);
-
-    let position = position * channel_area;
-
-    let (x, y) = if position < cool_area {
-        let x_ = position.div_euclid(vp.height);
-        let y = if x_.rem_euclid(2.) == 0. {
-            position.rem_euclid(vp.height)
-        } else {
-            vp.height - position.rem_euclid(vp.height)
-        };
-        (x_ + y, y)
-    } else {
-        let x_ = vp.width - vp.height;
-        let uncool_position = position - cool_area;
-        if x_.rem_euclid(2.) == 0. {
-            // 0.5 x (x+1) = position - cool_area
-            // => x^2 + x - 2 (position - cool_area) = 0
-            // => x = 0.5 (-1 + sqrt(1 + 8 (position - cool_area)))
-            let x = (0.5 * ((1. + 8. * uncool_position).sqrt() - 1.)).floor();
-            let y = uncool_position - 0.5 * x * (x + 1.);
-            (x_ + x, y)
-        } else {
-            // channel_area - 0.5 x (x+1) = position - cool_area
-            // 0.5 x (x+1) = channel_area - (position - cool_area)
-            // => x^2 + x - 2 (channel_area - (position - cool_area)) = 0
-            // => x = 0.5 (-1 + sqrt(1 + 8 (channel_area - (position - cool_area))))
-            let x = (0.5 * ((1. + 8. * (channel_area - uncool_position)).sqrt() - 1.)).ceil();
-            let y = channel_area - uncool_position - 0.5 * x * (x + 1.);
-            (vp.width - x - y, vp.height - y)
-        }
-    };
-    (x, y)
-}
-
-#[test]
-fn positional() {
-    for position in [0.5, 0.6, 0.7, 0.8] {
-        let q0 = expand_position(position, size2(960., 540.));
-        let q1 = expand_position(position, size2(1920., 1080.));
-        let q2 = expand_position(position, size2(3840., 2160.));
-        eprintln!("{q0:?} , {q1:?} , {q2:?}");
     }
 }
 
