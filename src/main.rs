@@ -1,7 +1,7 @@
 use std::{iter, ops::RangeInclusive, path::PathBuf};
 
 use anyhow::Context;
-use audio_vis::{BufIter, Model, STEP, T_SWEET};
+use audio_vis::{BufIter, Model, T_SWEET};
 use clap::{Args, Parser, Subcommand};
 use euclid::default::Size2D;
 use itertools::Itertools;
@@ -17,6 +17,8 @@ struct Cli {
 
     #[arg(global = true, required = false)]
     audio_path: PathBuf,
+    #[arg(global = true, short = 's', long = "step", default_value_t = 1200)]
+    step: usize,
     #[arg(global = true, short, long)]
     downsample: bool,
     #[arg(global = true, short = '0', long)]
@@ -38,6 +40,8 @@ struct Config {
     pub linear_position: bool,
     #[arg(global = true, short = 'i', long)]
     pub independent_luma: bool,
+    #[arg(global = true, short = 'C', long)]
+    pub linear_chroma: bool,
     #[arg(global = true, long, value_parser = parse_range)]
     pub luma_range: Option<RangeInclusive<f32>>,
     #[arg(global = true, short = 'c', long, value_parser = parse_range)]
@@ -58,9 +62,9 @@ fn parse_range(s: &str) -> anyhow::Result<RangeInclusive<f32>> {
 #[derive(Subcommand)]
 enum Commands {
     Render {
-        #[arg(short = 'x', long)]
+        #[arg(short = 'x', long, default_value_t = 0)]
         skip: usize,
-        #[arg(short = 'z', long)]
+        #[arg(short = 'z', long, default_value_t = usize::MAX)]
         upto: usize,
         #[arg(short = 'D', long, default_value = "renders")]
         save_in: PathBuf,
@@ -82,6 +86,7 @@ fn main() -> anyhow::Result<()> {
     let Cli {
         command,
         audio_path,
+        step,
         downsample,
         dont_prepend_zero,
         config_path,
@@ -106,6 +111,7 @@ fn main() -> anyhow::Result<()> {
     try_replace(&mut config.vol_per_half_turn, cli_config.vol_per_half_turn);
     config.linear_position |= cli_config.linear_position;
     config.independent_luma |= cli_config.independent_luma;
+    config.linear_chroma |= cli_config.linear_chroma;
     try_replace(&mut config.luma_range, cli_config.luma_range);
     try_replace(&mut config.chroma_range, cli_config.chroma_range);
     try_replace(&mut config.hue_range, cli_config.hue_range);
@@ -141,12 +147,12 @@ fn main() -> anyhow::Result<()> {
         .chain(iter::repeat((0, 0)).take((T_SWEET * sample_rate as f32) as usize));
     // ((last_channel_0, last_channel_1), (now_channel_0, now_channel_1))
     let audio_iter = if downsample {
-        Box::new(audio_iter.step_by(STEP).tuple_windows()) as BufIter
+        Box::new(audio_iter.step_by(step).tuple_windows()) as BufIter
     } else {
-        Box::new(audio_iter.tuple_windows().step_by(STEP)) as BufIter
+        Box::new(audio_iter.tuple_windows().step_by(step)) as BufIter
     };
 
-    let model = Model::new(sample_rate, audio_iter, config)?;
+    let model = Model::new(audio_iter, sample_rate, step, config)?;
 
     match command {
         Commands::Render {

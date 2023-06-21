@@ -68,7 +68,7 @@ impl State {
         let shader =
             device.create_shader_module(wgpu::include_wgsl!("../shader/vertex_fragment.wgsl"));
 
-        let sample_cmds = vec![SampleDesc::default(); model.expented_buffer_len() * 2];
+        let sample_cmds = vec![SampleDesc::default(); model.expected_buffer_len() * 2];
         let sample_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label: Some("samples Buffer"),
             contents: bytemuck::cast_slice(&sample_cmds),

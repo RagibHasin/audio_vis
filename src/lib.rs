@@ -11,7 +11,6 @@ use serde::Deserialize;
 
 pub type BufIter = Box<dyn Iterator<Item = ((i16, i16), (i16, i16))>>;
 
-pub const STEP: usize = 1200;
 pub const F_MAX: f32 = 20e3;
 pub const T_SWEET: f32 = 4.32;
 pub const GOLDEN_RATIO: f32 = 0.6085538238;
@@ -34,8 +33,9 @@ fn digamma_u(y: f32) -> f32 {
 }
 
 pub struct Model {
-    pub sample_rate: u32,
     pub audio_iter: BufIter,
+    pub sample_rate: u32,
+    pub step: usize,
     pub audio_buffer: [Vec<(i16, i16)>; 2],
     pub sample_buffer: [Vec<PartialSampleDesc>; 2],
     pub k_offset: usize,
@@ -49,6 +49,7 @@ pub struct Config {
     pub vol_per_half_turn: i16,
     pub linear_position: bool,
     pub independent_luma: bool,
+    pub linear_chroma: bool,
     pub luma_range: RangeInclusive<f32>,
     pub chroma_range: RangeInclusive<f32>,
     pub hue_range: RangeInclusive<f32>,
@@ -84,6 +85,7 @@ impl Default for Config {
             vol_per_half_turn: 5120,
             linear_position: false,
             independent_luma: false,
+            linear_chroma: false,
             luma_range: 0.0..=1.,
             chroma_range: 0.0..=2.8,
             hue_range: 0.0..=360.,
@@ -98,12 +100,17 @@ impl Model {
         self.audio_buffer[0].len()
     }
 
-    pub fn expented_buffer_len(&self) -> usize {
-        (self.sample_rate as f32 * T_SWEET) as usize / STEP + 1
+    pub fn expected_buffer_len(&self) -> usize {
+        (self.sample_rate as f32 * T_SWEET) as usize / self.step
     }
 
-    pub fn new(sample_rate: u32, audio_iter: BufIter, config: Config) -> anyhow::Result<Model> {
-        let buffer_size = (sample_rate as f32 * T_SWEET) as usize / STEP;
+    pub fn new(
+        audio_iter: BufIter,
+        sample_rate: u32,
+        step: usize,
+        config: Config,
+    ) -> anyhow::Result<Model> {
+        let buffer_size = (sample_rate as f32 * T_SWEET) as usize / step;
         let audio_buffer = [vec![(0, 0); buffer_size], vec![(0, 0); buffer_size]];
         let sample_buffer = [
             vec![PartialSampleDesc::default(); buffer_size],
@@ -113,8 +120,9 @@ impl Model {
         tracing::info!(?config);
 
         Ok(Model {
-            sample_rate,
             audio_iter,
+            sample_rate,
+            step,
             audio_buffer,
             sample_buffer,
             k_offset: 0,
@@ -126,8 +134,8 @@ impl Model {
         let elapsed_audio_sample = (since_last.as_nanos() * self.sample_rate as u128
             / 1_000_000_000) as usize
             + self.k_offset;
-        let take = elapsed_audio_sample / STEP;
-        self.k_offset = elapsed_audio_sample % STEP;
+        let take = elapsed_audio_sample / self.step;
+        self.k_offset = elapsed_audio_sample % self.step;
 
         let buffer_len = self.buffer_len();
         for buf in &mut self.audio_buffer {
@@ -178,14 +186,17 @@ impl Model {
                         };
 
                     let audio = to_f32(audio);
-                    let chroma = (audio / phase.cos())
-                        .abs()
-                        .clamp(*config.chroma_range.start(), *config.chroma_range.end());
-                    let hue = (phase.rem_euclid(consts::TAU) / consts::TAU
+                    let chroma = if config.linear_chroma {
+                        (audio / phase.cos()).abs()
+                    } else {
+                        // gamma_c(audio.abs()) / digamma_u(phase.cos().abs())
+                        gamma_c(audio.abs()) / phase.cos().abs()
+                    }
+                    .clamp(*config.chroma_range.start(), *config.chroma_range.end());
+                    let hue = ((phase + config.hue_offset).rem_euclid(consts::TAU) / consts::TAU
                         * (config.hue_range.end() - config.hue_range.start())
-                        + *config.hue_range.start()
-                        + config.hue_offset)
-                        .to_radians();
+                        + *config.hue_range.start())
+                    .to_radians();
 
                     *prev_position = position;
 
@@ -200,7 +211,7 @@ impl Model {
             ));
         }
 
-        self.buffer_len() != self.expented_buffer_len() // is finished?
+        self.buffer_len() != self.expected_buffer_len() // is finished?
     }
 
     pub fn render(&self) -> impl Iterator<Item = SampleDesc> + '_ {
@@ -224,7 +235,7 @@ impl Model {
         )| {
             let config = &self.config;
             let channel = j % 2;
-            let k = (buffer_size - i - 2) * STEP + self.k_offset;
+            let k = (buffer_size - i - 2) * self.step + self.k_offset;
 
             let abs_frac_freq = frac_freq.rem_euclid(1.);
             let decay_time = T_SWEET * 2f32.powf(-abs_frac_freq);
@@ -287,7 +298,7 @@ impl Model {
             let luma = if self.config.independent_luma {
                 gamma_c(abs_frac_freq)
             } else {
-                (gamma_c(abs_frac_freq) * gamma_c(audio.abs())).powf(GOLDEN_RATIO)
+                gamma_c(gamma_c(abs_frac_freq) * gamma_c(audio.abs()))
             };
             let luma = luma * (config.luma_range.end() - config.luma_range.start())
                 + *config.luma_range.start();
