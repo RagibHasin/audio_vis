@@ -16,16 +16,25 @@ struct Cli {
     command: Commands,
 
     #[arg(global = true, required = false)]
+    /// Path to the audio file
     audio_path: PathBuf,
+    
     #[arg(global = true, short = 's', long = "step", default_value_t = 1200)]
+    /// Step size
     step: usize,
+    
     #[arg(global = true, short, long)]
+    /// Downsample when stepping
     downsample: bool,
+    
     #[arg(global = true, short = '0', long)]
+    /// Prepend zero on initialization
     dont_prepend_zero: bool,
 
     #[arg(global = true, long = "config")]
+    /// Path to configuration file
     config_path: Option<PathBuf>,
+    
     #[command(flatten)]
     config: Config,
 }
@@ -33,24 +42,43 @@ struct Cli {
 #[derive(Args)]
 struct Config {
     #[arg(global = true, long = "vp", value_parser = audio_vis::parse_size)]
+    /// Size of the viewport
     pub viewport_size: Option<Size2D<u32>>,
+    
     #[arg(global = true, long = "vpht")]
+    /// Volume per half turn in audio phase
     pub vol_per_half_turn: Option<i16>,
+    
     #[arg(global = true, short, long = "linear-pos")]
+    /// Calculate position linearly
     pub linear_position: bool,
+    
     #[arg(global = true, short = 'i', long)]
+    /// Luminance independent of volume
     pub independent_luma: bool,
+    
     #[arg(global = true, short = 'C', long)]
+    /// Calculate chromaticity linearly
     pub linear_chroma: bool,
+    
     #[arg(global = true, long, value_parser = parse_range)]
+    /// Mapped range of luminance
     pub luma_range: Option<RangeInclusive<f32>>,
+    
     #[arg(global = true, short = 'c', long, value_parser = parse_range)]
+    /// Clipped range of chromaticity
     pub chroma_range: Option<RangeInclusive<f32>>,
+    
     #[arg(global = true, long, value_parser = parse_range)]
+    /// Mapped range of hue
     pub hue_range: Option<RangeInclusive<f32>>,
+    
     #[arg(global = true, short = 'H', long)]
+    /// Hue offset, applied before mapping
     pub hue_offset: Option<f32>,
+    
     #[arg(global = true, short, long)]
+    /// Factor of circle fuzziness
     pub fuzz_factor: Option<f32>,
 }
 
@@ -61,16 +89,24 @@ fn parse_range(s: &str) -> anyhow::Result<RangeInclusive<f32>> {
 
 #[derive(Subcommand)]
 enum Commands {
+    /// Render images at 30fps as PNG
     Render {
         #[arg(short = 'x', long, default_value_t = 0)]
+        /// Number of frames to be skipped
         skip: usize,
+        
         #[arg(short = 'z', long, default_value_t = usize::MAX)]
+        /// Number of frame, upto which would be rendered
         upto: usize,
+        
         #[arg(short = 'D', long, default_value = "renders")]
+        /// Directory for the saved images
         save_in: PathBuf,
     },
+    /// View visualization in real-time with optional audio
     View {
         #[arg(short = 'a', long)]
+        /// Enable audio
         enable_audio: bool,
     },
 }
@@ -134,17 +170,14 @@ fn main() -> anyhow::Result<()> {
                     Some((v, v))
                 } else {
                     let w = audio_reader.next()?;
-                    audio_reader
-                        .by_ref()
-                        .take(channels as usize - 2)
-                        .for_each(|_| {});
+                    audio_reader.by_ref().dropping(channels as usize - 2);
                     Some((v, w))
                 }
             })
             .flatten()
             .fuse(),
         ) // (channel_0, channel_1)
-        .chain(iter::repeat((0, 0)).take((T_SWEET * sample_rate as f32) as usize));
+        .chain(iter::repeat((0, 0)).take((T_SWEET * sample_rate as f32).ceil() as usize));
     // ((last_channel_0, last_channel_1), (now_channel_0, now_channel_1))
     let audio_iter = if downsample {
         Box::new(audio_iter.step_by(step).tuple_windows()) as BufIter

@@ -193,7 +193,7 @@ impl Model {
                         gamma_c(audio.abs()) / phase.cos().abs()
                     }
                     .clamp(*config.chroma_range.start(), *config.chroma_range.end());
-                    let hue = ((phase + config.hue_offset).rem_euclid(consts::TAU) / consts::TAU
+                    let hue = ((phase + config.hue_offset.to_radians()).rem_euclid(consts::TAU) / consts::TAU
                         * (config.hue_range.end() - config.hue_range.start())
                         + *config.hue_range.start())
                     .to_radians();
